@@ -1,0 +1,9 @@
+name: M10PracticeMenu
+version: 1.0.0
+main: com.example.m10practice.Main
+api-version: '1.21.8'
+
+commands:
+  m10menu:
+    description: テスト用コマンド
+    usage: /m10menu
