@@ -18,6 +18,23 @@ public void onEnable() {
 
     getServer().getPluginManager()
     .registerEvents(new MenuListener(this), this);
+    
+    //クリックイベントを登録
+    getServer().getPluginManager().registerEvents(
+    new MiniGolemListener(this), this);
+    
+    //ミニゴーレム召喚コマンドを登録
+    getCommand("spawnminigolem")
+        .setExecutor(new MiniGolemCommand());
+    
+    // SantaGirlの召喚コマンドを登録
+    getCommand("spawnsantagirl")
+        .setExecutor(new SantaGirlCommand());
+    
+    // SantaGirlへのクリックイベントを登録
+    getServer().getPluginManager().registerEvents(
+        new SantaGirlListener(this), this
+    );
 }
 
     @Override

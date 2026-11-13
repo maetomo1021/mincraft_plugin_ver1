@@ -3,7 +3,27 @@ version: 1.0.0
 main: com.example.m10practice.Main
 api-version: '1.21.8'
 
+depend:
+  - ModelEngine
+
 commands:
   m10menu:
     description: テスト用コマンド
     usage: /m10menu
+
+  spawnminigolem:
+    description: MiniGolemを召喚します
+    usage: /spawnminigolem
+    permission: m10practice.spawnminigolem
+
+  spawnsantagirl:
+    description: SantaGirlを召喚します
+    usage: /spawnsantagirl
+    permission: m10practice.spawnsantagirl
+
+permissions:
+  m10practice.spawnminigolem:
+    default: op
+
+  m10practice.spawnsantagirl:
+    default: op
