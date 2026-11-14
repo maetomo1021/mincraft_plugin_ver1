@@ -3,19 +3,20 @@ package com.example.m10practice;
 
 import com.ticxo.modelengine.api.events.BaseEntityInteractEvent;
 import com.ticxo.modelengine.api.model.ActiveModel;
-import org.bukkit.NamespacedKey;
-import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.persistence.PersistentDataType;
-import java.util.Arrays;
+
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataType;
 
+import java.util.Arrays;
 import java.util.Map;
 import java.util.WeakHashMap;
 
@@ -54,15 +55,13 @@ public class SantaGirlListener implements Listener {
 
         Player player = event.getPlayer();
 
-        // 5秒以内の連続操作を防ぐ
+        // 約6秒間の連打防止
         long now = System.currentTimeMillis();
         long previous = cooldowns.getOrDefault(model, 0L);
 
-        if (now - previous < 5000) {
+        if (now - previous < 6000) {
             return;
         }
-
-        cooldowns.put(model, now);
 
         // アニメーションが存在するか確認
         if (!model.getBlueprint().getAnimations()
@@ -72,7 +71,14 @@ public class SantaGirlListener implements Listener {
             return;
         }
 
-        // プレゼントを渡すアニメーションを再生
+        cooldowns.put(model, now);
+
+        // 開始時は必ずBOXを非表示
+        model.getBone("gift_box").ifPresent(bone -> {
+            bone.setVisible(false);
+        });
+
+        // プレゼントを渡すアニメーション
         model.getAnimationHandler().playAnimation(
                 "give_present",
                 0.1,
@@ -84,58 +90,103 @@ public class SantaGirlListener implements Listener {
         player.sendMessage(ChatColor.LIGHT_PURPLE
                 + "SantaGirl: プレゼントをどうぞ！");
 
-        // 約3秒後にアイテムを渡す
+        // 2.5秒後：BOXを表示
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+
+            model.getBone("gift_box").ifPresentOrElse(bone -> {
+
+                bone.setVisible(true);
+
+                plugin.getLogger().info(
+                    "SantaGirl: gift_box表示ON"
+                );
+
+            }, () -> {
+
+                plugin.getLogger().warning(
+                    "SantaGirl: gift_boxが見つかりません"
+                );
+
+            });
+
+        }, 50L);
+
+        // 4秒後：聖夜の結晶を渡す
         Bukkit.getScheduler().runTaskLater(plugin, () -> {
 
             if (!player.isOnline()) {
                 return;
             }
 
+            ItemStack present =
+                    new ItemStack(Material.AMETHYST_SHARD, 1);
 
-        ItemStack present = new ItemStack(Material.AMETHYST_SHARD, 1);
-        
-        ItemMeta meta = present.getItemMeta();
-        
-        // 専用テクスチャを指定
-        meta.setItemModel(
-            NamespacedKey.fromString("m10practice:holy_night_crystal")
-        );
-        
-        // アイテム名
-        meta.setDisplayName(
-            ChatColor.AQUA + "❄ 聖夜の結晶 ❄"
-        );
-        
-        // 説明文
-        meta.setLore(Arrays.asList(
-            ChatColor.GRAY + "冬の夜にだけ現れる、不思議な結晶。",
-            ChatColor.GRAY + "SantaGirlから授かった特別な贈り物。",
-            "",
-            ChatColor.LIGHT_PURPLE + "Christmas Limited Item",
-            ChatColor.GOLD + "★ 特別報酬 ★"
-        ));
-        
-        // 独自アイテムとして識別するID
-        meta.getPersistentDataContainer().set(
-            new NamespacedKey(plugin, "holy_night_crystal"),
-            PersistentDataType.STRING,
-            "holy_night_crystal"
-        );
-        
-        present.setItemMeta(meta);
+            ItemMeta meta = present.getItemMeta();
 
-            // インベントリに入らない分は足元に落とす
-            var leftover = player.getInventory().addItem(present);
+            // 聖夜の結晶の専用モデル
+            meta.setItemModel(
+                NamespacedKey.fromString(
+                    "m10practice:holy_night_crystal"
+                )
+            );
+
+            // アイテム名
+            meta.setDisplayName(
+                ChatColor.AQUA + "❄ 聖夜の結晶 ❄"
+            );
+
+            // 説明文
+            meta.setLore(Arrays.asList(
+                ChatColor.GRAY
+                    + "冬の夜にだけ現れる、不思議な結晶。",
+                ChatColor.GRAY
+                    + "SantaGirlから授かった特別な贈り物。",
+                "",
+                ChatColor.LIGHT_PURPLE
+                    + "Christmas Limited Item",
+                ChatColor.GOLD
+                    + "★ 特別報酬 ★"
+            ));
+
+            // 独自アイテムID
+            meta.getPersistentDataContainer().set(
+                new NamespacedKey(
+                    plugin,
+                    "holy_night_crystal"
+                ),
+                PersistentDataType.STRING,
+                "holy_night_crystal"
+            );
+
+            present.setItemMeta(meta);
+
+            // インベントリに入らない場合は足元へ落とす
+            var leftover =
+                    player.getInventory().addItem(present);
 
             for (ItemStack item : leftover.values()) {
                 player.getWorld().dropItemNaturally(
-                        player.getLocation(), item
+                    player.getLocation(),
+                    item
                 );
             }
 
             player.sendMessage(ChatColor.AQUA
                     + "❄ 聖夜の結晶を受け取りました！");
 
-        }, 60L);
+        }, 80L);
+
+        // 4.5秒後：BOXを非表示
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+
+            model.getBone("gift_box").ifPresent(bone -> {
+                bone.setVisible(false);
+            });
+
+            plugin.getLogger().info(
+                "SantaGirl: gift_box表示OFF"
+            );
+
+        }, 110L);
     }
 }

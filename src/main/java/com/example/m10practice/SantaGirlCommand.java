@@ -53,7 +53,20 @@ public class SantaGirlCommand implements CommandExecutor {
                 ModelEngineAPI.createModeledEntity(pig);
 
         modeledEntity.addModel(model, true);
-
+        // 召喚直後はプレゼントBOXを非表示
+        model.getBone("gift_box").ifPresent(bone -> {
+            bone.setVisible(false);
+        });
+        
+        // 通常時のアニメーションを明示的に再生
+        model.getAnimationHandler().playAnimation(
+            "idle",
+            0.0,
+            0.0,
+            1.0,
+            true
+        );
+        
         player.sendMessage(ChatColor.GREEN
                 + "SantaGirlを召喚しました！");
 
