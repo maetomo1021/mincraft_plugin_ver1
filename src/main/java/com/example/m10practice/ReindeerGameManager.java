@@ -39,7 +39,7 @@ public class ReindeerGameManager {
     private double maxRunRadius;
     private Vector forward;
     private Vector right;
-    private ItemStack savedSlot;
+    private final ReindeerInventoryBackup inventoryBackup;
     private BossBar bossBar;
     private BukkitTask timerTask;
     private BukkitTask moveTask;
@@ -51,6 +51,7 @@ public class ReindeerGameManager {
 
     public ReindeerGameManager(JavaPlugin plugin) {
         this.plugin = plugin;
+        this.inventoryBackup = new ReindeerInventoryBackup(plugin);
     }
 
     public boolean isRunning() {
@@ -60,6 +61,19 @@ public class ReindeerGameManager {
     public boolean isPlaying(Player player) {
         return playing && playerId != null
                 && playerId.equals(player.getUniqueId());
+    }
+
+    // カウントダウン中も含め、参加者のインベントリ操作を制限する。
+    public boolean isParticipant(Player player) {
+        return running && playerId != null
+                && playerId.equals(player.getUniqueId());
+    }
+
+    // 再ログイン時の未復元データを安全に戻す。
+    public void recoverInventory(Player player) {
+        if (!isParticipant(player)) {
+            inventoryBackup.restore(player);
+        }
     }
 
     public boolean isTarget(Pig pig) {
@@ -156,6 +170,17 @@ public class ReindeerGameManager {
             return;
         }
 
+        // 保存に失敗したら開始しない。前回の未復元データがある場合も開始しない。
+        if (inventoryBackup.hasBackup(player.getUniqueId())) {
+            player.sendMessage("§e前回の持ち物バックアップがあります。まず復元します。再度開始してください。");
+            inventoryBackup.restore(player);
+            return;
+        }
+        if (!inventoryBackup.save(player)) {
+            player.sendMessage("§c持ち物の保存に失敗しました。ゲームを中止します。");
+            return;
+        }
+
         running = true;
         playing = false;
         seconds = 0;
@@ -175,12 +200,11 @@ public class ReindeerGameManager {
                 -forward.getZ(), 0, forward.getX()
         );
 
-        // 元のホットバー1番目を保存
-        savedSlot = player.getInventory().getItem(0);
-        if (savedSlot != null) {
-            savedSlot = savedSlot.clone();
-        }
-
+        // 元の持ち物（防具・オフハンド含む）はファイルへ保存済み。
+        // いったん全スロットを空にしてゲーム専用の雪玉だけ配る。
+        player.getInventory().clear();
+        player.getInventory().setArmorContents(new ItemStack[4]);
+        player.getInventory().setItemInOffHand(new ItemStack(Material.AIR));
         player.getInventory().setItem(
                 0, new ItemStack(Material.SNOWBALL, 64)
         );
@@ -527,7 +551,8 @@ private void startMovement() {
                 ? null : Bukkit.getPlayer(playerId);
 
         if (player != null) {
-            player.getInventory().setItem(0, savedSlot);
+            // ゲーム用アイテムをすべて破棄し、保存済みの全スロットを復元。
+            inventoryBackup.restore(player);
 
             if (showResult) {
                 player.sendTitle(
@@ -548,6 +573,5 @@ private void startMovement() {
         }
 
         playerId = null;
-        savedSlot = null;
     }
 }
