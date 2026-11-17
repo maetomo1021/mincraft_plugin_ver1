@@ -21,9 +21,22 @@ commands:
     usage: /spawnsantagirl
     permission: m10practice.spawnsantagirl
 
+  spawnreindeer:
+    description: トナカイを召喚します
+    usage: /spawnreindeer
+    permission: m10practice.admin
+    
+  startreindeergame:
+    description: トナカイ射的ゲームを開始
+    usage: /startreindeergame
+    permission: m10practice.admin
+
 permissions:
   m10practice.spawnminigolem:
     default: op
 
   m10practice.spawnsantagirl:
+    default: op
+
+  m10practice.admin:
     default: op
