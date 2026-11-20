@@ -23,30 +23,40 @@ import java.util.concurrent.ThreadLocalRandom;
 
 public final class GorillaAutoAI {
 
-    private static final double DETECT_DISTANCE_SQ = 24.0 * 24.0;
-    private static final double ATTACK_DISTANCE_SQ = 6.0 * 6.0;
-    private static final double STOP_DISTANCE_SQ = 4.0 * 4.0;
+    private static final double DETECT_SQ =
+            24.0 * 24.0;
 
+    private static final double ATTACK_SQ =
+            6.0 * 6.0;
+
+    private static final double STOP_SQ =
+            4.0 * 4.0;
+
+    // 前回調整した毎tick移動の速度を維持
     private static final double CHASE_SPEED = 0.10;
     private static final double WANDER_SPEED = 0.05;
-    private static final double WANDER_RADIUS = 7.0;
 
-    private static final int ATTACK_COOLDOWN_TICKS = 136;
+    private static final double WANDER_RADIUS = 7.0;
+    private static final int ATTACK_COOLDOWN = 136;
 
     private enum Movement {
         NONE, IDLE, WALK
     }
 
+    // 既存3技と追加6技
     private enum Attack {
-        NONE, BEAM, KNOCKBACK, JUMP
+        NONE, BEAM, KNOCKBACK, JUMP,
+        SPIKES, MISSILES, BLIZZARD, DOUBLE_WAVE, METEOR, CAGE
     }
 
-    private static final class GorillaState {
+    private static final class State {
 
         final Location home;
 
         Location wanderGoal;
         Location beamAnchor;
+
+        UUID targetId;
 
         int nextWanderTick;
         int nextAttackTick;
@@ -54,44 +64,49 @@ public final class GorillaAutoAI {
         int nextTargetSelectionTick;
         int nextAnimationCheckTick;
 
-        UUID targetId;
-
         Movement movement = Movement.NONE;
         Attack lastAttack = Attack.NONE;
 
-        GorillaState(Location home) {
+        State(Location home) {
             this.home = home.clone();
         }
     }
 
     private final JavaPlugin plugin;
     private final GorillaCommand command;
-    private final GorillaListener attackListener;
-    private final GorillaFreezeBeam freezeBeam;
-    private final GorillaJumpAttack jumpAttack;
+    private final GorillaListener knockback;
 
-    private final Map<UUID, GorillaState> states =
+    private final GorillaFreezeBeam beam;
+    private final GorillaJumpAttack jump;
+
+    private final GorillaExtraAttacks extras;
+
+    private final Map<UUID, State> states =
             new HashMap<>();
 
-    private final Map<ActiveModel, Movement> animationStates =
+    private final Map<ActiveModel, Movement> animations =
             new IdentityHashMap<>();
 
-    private long debugTicks = 0;
-    private String lastMoveResult = "not attempted";
-    private String lastTargetName = "none";
+    private long aiTicks = 0;
+
+    private String lastMove = "not attempted";
+    private String lastTarget = "none";
 
     public GorillaAutoAI(
             JavaPlugin plugin,
             GorillaCommand command,
-            GorillaListener attackListener
+            GorillaListener knockback
     ) {
         this.plugin = plugin;
         this.command = command;
-        this.attackListener = attackListener;
+        this.knockback = knockback;
 
-        this.freezeBeam = new GorillaFreezeBeam(plugin);
-        this.jumpAttack = new GorillaJumpAttack(plugin);
+        this.beam = new GorillaFreezeBeam(plugin);
+        this.jump = new GorillaJumpAttack(plugin);
 
+        this.extras = new GorillaExtraAttacks(plugin);
+
+        // カクつき対策で調整した毎tick更新を維持
         Bukkit.getScheduler().runTaskTimer(
                 plugin,
                 this::tick,
@@ -100,18 +115,18 @@ public final class GorillaAutoAI {
         );
     }
 
-    // =========================================
+    // =====================================
     // AIメインループ
-    // =========================================
+    // =====================================
 
     private void tick() {
 
         Map<ActiveModel, UUID> gorillas =
                 command.getSpawnedGorillas();
 
-        int valid = 0;
+        Set<UUID> living = new HashSet<>();
 
-        Set<UUID> livingIds = new HashSet<>();
+        int valid = 0;
 
         for (Map.Entry<ActiveModel, UUID> entry
                 : gorillas.entrySet()) {
@@ -126,140 +141,124 @@ public final class GorillaAutoAI {
                     || !pig.getScoreboardTags()
                             .contains("m10_gorilla_test")) {
 
-                animationStates.remove(model);
+                animations.remove(model);
                 continue;
             }
 
             valid++;
-            livingIds.add(id);
+            living.add(id);
 
-            GorillaState state = states.computeIfAbsent(
+            State state = states.computeIfAbsent(
                     id,
-                    ignored -> new GorillaState(pig.getLocation())
+                    key -> new State(pig.getLocation())
             );
 
-            // ジャンプ攻撃中
-            if (jumpAttack.isAttacking(model)) {
+            // 全攻撃中は通常移動を禁止
+            if (extras.isAttacking(model)
+                    || jump.isAttacking(model)
+                    || knockback.isAttacking(model)) {
 
-                pauseMovement(model, pig, state);
+                pause(model, pig, state);
                 continue;
             }
 
-            // ビーム攻撃中
-            if (freezeBeam.isAttacking(model)) {
+            // 通常冷凍ビーム中の位置固定
+            if (beam.isAttacking(model)) {
 
                 if (state.beamAnchor != null
-                        && pig.getLocation().distanceSquared(
-                                state.beamAnchor
-                        ) > 0.0004) {
+                        && pig.getLocation()
+                                .distanceSquared(
+                                        state.beamAnchor
+                                ) > 0.0004) {
 
                     pig.teleport(state.beamAnchor);
-
-                    // 修正：固定位置への移動後に
-                    // ModelEngine本体のYawを再同期する
-                    GorillaFacing.syncModel(
-                            model,
-                            pig.getLocation().getYaw()
-                    );
                 }
 
                 pig.setVelocity(new Vector(0, 0, 0));
 
-                stopMovementAnimation(model);
-
+                stopAnimation(model);
                 state.movement = Movement.NONE;
+
                 continue;
             }
 
             state.beamAnchor = null;
 
-            // ノックバック攻撃中
-            if (attackListener.isAttacking(model)) {
-
-                pauseMovement(model, pig, state);
-                continue;
-            }
-
             Player target = chooseTarget(pig, state);
 
-            if (target != null) {
+            if (target == null) {
 
-                lastTargetName = target.getName();
+                lastTarget = "none";
+                wander(model, pig, state);
 
+            } else {
+
+                lastTarget = target.getName();
                 state.wanderGoal = null;
 
-                chaseOrAttack(
+                chase(
                         model,
                         id,
                         pig,
                         state,
                         target
                 );
-
-            } else {
-
-                lastTargetName = "none";
-
-                wander(model, pig, state);
             }
         }
 
-        states.keySet().retainAll(livingIds);
+        states.keySet().retainAll(living);
 
-        animationStates.keySet().retainAll(
+        animations.keySet().retainAll(
                 gorillas.keySet()
         );
 
-        if (++debugTicks % 50 == 0) {
-
+        if (++aiTicks % 100 == 0) {
             plugin.getLogger().info(
                     "[GorillaAI DEBUG] registered="
                             + gorillas.size()
                             + " valid=" + valid
-                            + " target=" + lastTargetName
-                            + " move=" + lastMoveResult
+                            + " target=" + lastTarget
+                            + " move=" + lastMove
             );
         }
     }
 
-    // =========================================
+    // =====================================
     // 攻撃中の移動停止
-    // =========================================
+    // =====================================
 
-    private void pauseMovement(
+    private void pause(
             ActiveModel model,
             Pig pig,
-            GorillaState state
+            State state
     ) {
-
-        stopHorizontalMovement(pig);
-        stopMovementAnimation(model);
-
+        stopHorizontal(pig);
+        stopAnimation(model);
         state.movement = Movement.NONE;
     }
 
-    // =========================================
-    // プレイヤー追跡・攻撃
-    // =========================================
+    // =====================================
+    // プレイヤー追跡・攻撃判断
+    // =====================================
 
-    private void chaseOrAttack(
+    private void chase(
             ActiveModel model,
             UUID id,
             Pig pig,
-            GorillaState state,
+            State state,
             Player target
     ) {
 
-        Vector toTarget = target.getLocation()
+        Vector toward = target.getLocation()
                 .toVector()
                 .subtract(pig.getLocation().toVector())
                 .setY(0);
 
-        double distanceSq = toTarget.lengthSquared();
+        double distanceSq = toward.lengthSquared();
 
         if (distanceSq < 0.001) {
 
-            stopHorizontalMovement(pig);
+            stopHorizontal(pig);
 
             setMovement(
                     model,
@@ -270,10 +269,8 @@ public final class GorillaAutoAI {
             return;
         }
 
-        Vector direction = toTarget.normalize();
+        Vector direction = toward.normalize();
 
-        // まず攻撃方向に向ける
-        // 移動した場合は移動完了後にも同期する
         GorillaFacing.faceDirection(
                 pig,
                 model,
@@ -281,50 +278,53 @@ public final class GorillaAutoAI {
         );
 
         boolean near =
-                distanceSq <= ATTACK_DISTANCE_SQ;
+                distanceSq <= ATTACK_SQ;
 
-        boolean inJumpRange =
+        boolean jumpRange =
                 distanceSq <= 12.0 * 12.0;
 
-        boolean inBeamRange =
+        boolean beamRange =
                 distanceSq <= 14.0 * 14.0;
 
-        boolean cooldownDone =
-                pig.getTicksLived()
-                        >= state.nextAttackTick;
+        boolean extraRange =
+                distanceSq <= 22.0 * 22.0;
 
-        if (cooldownDone && inBeamRange) {
+        if (pig.getTicksLived() >= state.nextAttackTick
+                && extraRange) {
 
-            List<Attack> choices = new ArrayList<>();
+            List<Attack> options = new ArrayList<>();
+
+            if (near) {
+                options.add(Attack.KNOCKBACK);
+                options.add(Attack.BEAM);
+                options.add(Attack.JUMP);
+            } else if (jumpRange) {
+                options.add(Attack.JUMP);
+                options.add(Attack.BEAM);
+            } else if (beamRange) {
+                options.add(Attack.BEAM);
+            }
+
+            // 追加技は全距離帯に分散させる
+            options.add(Attack.SPIKES);
+            options.add(Attack.MISSILES);
+            options.add(Attack.BLIZZARD);
+            options.add(Attack.DOUBLE_WAVE);
+            options.add(Attack.METEOR);
+            options.add(Attack.CAGE);
+
+            // 同じ攻撃の連発をできるだけ回避
+            if (options.size() > 1) {
+                options.remove(state.lastAttack);
+            }
+
+            Attack selected = Attack.NONE;
 
             if (near) {
 
-                choices.add(Attack.KNOCKBACK);
-                choices.add(Attack.BEAM);
-                choices.add(Attack.JUMP);
-
-            } else if (inJumpRange) {
-
-                choices.add(Attack.JUMP);
-                choices.add(Attack.BEAM);
-
-            } else {
-
-                choices.add(Attack.BEAM);
-            }
-
-            // 直前と同じ攻撃をできるだけ避ける
-            if (choices.size() > 1) {
-                choices.remove(state.lastAttack);
-            }
-
-            Attack chosen = Attack.NONE;
-
-            if (near) {
-
-                chosen = choices.get(
+                selected = options.get(
                         ThreadLocalRandom.current()
-                                .nextInt(choices.size())
+                                .nextInt(options.size())
                 );
 
             } else if (
@@ -335,99 +335,39 @@ public final class GorillaAutoAI {
                 state.nextLongRangeRollTick =
                         pig.getTicksLived() + 60;
 
+                // 中・遠距離では40%で攻撃
                 if (ThreadLocalRandom.current()
                         .nextInt(10) < 4
-                        && !choices.isEmpty()) {
+                        && !(options.size() == 1
+                        && options.get(0) == state.lastAttack)) {
 
-                    if (choices.size() == 1
-                            && choices.get(0) == Attack.BEAM
-                            && state.lastAttack == Attack.BEAM) {
-
-                        chosen = Attack.NONE;
-
-                    } else {
-
-                        chosen = choices.get(
-                                ThreadLocalRandom.current()
-                                        .nextInt(choices.size())
-                        );
-                    }
+                    selected = options.get(
+                            ThreadLocalRandom.current()
+                                    .nextInt(options.size())
+                    );
                 }
             }
 
-            if (chosen != Attack.NONE) {
-
-                stopHorizontalMovement(pig);
-                stopMovementAnimation(model);
-
-                model.getAnimationHandler()
-                        .stopAnimation("walk");
-
-                model.getAnimationHandler()
-                        .stopAnimation("idle");
-
-                state.movement = Movement.NONE;
-
-                boolean started;
-
-                if (chosen == Attack.BEAM) {
-
-                    started = freezeBeam.start(
+            if (selected != Attack.NONE
+                    && startAttack(
                             model,
                             id,
-                            target
-                    );
-
-                } else if (chosen == Attack.JUMP) {
-
-                    started = jumpAttack.start(
-                            model,
-                            id,
-                            target
-                    );
-
-                } else {
-
-                    started = attackListener.startKnockback(
-                            model,
-                            id,
-                            null
-                    );
-                }
-
-                if (started) {
-
-                    state.lastAttack = chosen;
-
-                    if (chosen == Attack.BEAM) {
-
-                        state.beamAnchor =
-                                pig.getLocation().clone();
-                    }
-
-                    state.nextAttackTick =
-                            pig.getTicksLived()
-                                    + ATTACK_COOLDOWN_TICKS;
-
-                    plugin.getLogger().info(
-                            "[GorillaAI] attack="
-                                    + chosen
-                                    + " target="
-                                    + target.getName()
-                    );
-
-                    return;
-                }
+                            pig,
+                            state,
+                            target,
+                            selected
+                    )) {
+                return;
             }
         }
 
-        // =====================================
+        // =================================
         // 通常追跡
-        // =====================================
+        // =================================
 
-        if (distanceSq <= STOP_DISTANCE_SQ) {
+        if (distanceSq <= STOP_SQ) {
 
-            stopHorizontalMovement(pig);
+            stopHorizontal(pig);
 
             setMovement(
                     model,
@@ -435,53 +375,123 @@ public final class GorillaAutoAI {
                     Movement.IDLE
             );
 
+        } else if (moveHorizontal(
+                pig,
+                direction,
+                CHASE_SPEED
+        )) {
+
+            setMovement(
+                    model,
+                    state,
+                    Movement.WALK
+            );
+
         } else {
 
-            // 修正：移動とモデルの向き同期を
-            // 同じメソッド内で完了させる
-            if (moveHorizontal(
+            setMovement(
                     model,
-                    pig,
-                    direction,
-                    CHASE_SPEED
-            )) {
-
-                setMovement(
-                        model,
-                        state,
-                        Movement.WALK
-                );
-
-            } else {
-
-                setMovement(
-                        model,
-                        state,
-                        Movement.IDLE
-                );
-            }
+                    state,
+                    Movement.IDLE
+            );
         }
     }
 
-    // =========================================
+    // =====================================
+    // 4種類の攻撃起動
+    // =====================================
+
+    private boolean startAttack(
+            ActiveModel model,
+            UUID id,
+            Pig pig,
+            State state,
+            Player target,
+            Attack selected
+    ) {
+
+        stopHorizontal(pig);
+        stopAnimation(model);
+
+        model.getAnimationHandler()
+                .stopAnimation("walk");
+
+        model.getAnimationHandler()
+                .stopAnimation("idle");
+
+        state.movement = Movement.NONE;
+
+        boolean started;
+
+        switch (selected) {
+
+            case BEAM -> started =
+                    beam.start(model, id, target);
+
+            case JUMP -> started =
+                    jump.start(model, id, target);
+
+            case SPIKES, MISSILES, BLIZZARD,
+                 DOUBLE_WAVE, METEOR, CAGE -> started =
+                    extras.start(
+                            GorillaExtraAttacks.Skill.valueOf(selected.name()),
+                            model, id, target
+                    );
+
+            case KNOCKBACK -> started =
+                    knockback.startKnockback(
+                            model,
+                            id,
+                            null
+                    );
+
+            default -> started = false;
+        }
+
+        if (!started) {
+            return false;
+        }
+
+        state.lastAttack = selected;
+
+        if (selected == Attack.BEAM) {
+            state.beamAnchor =
+                    pig.getLocation().clone();
+        }
+
+        // 長い演出中はbusyでロックし、終了後に再攻撃できる
+        state.nextAttackTick =
+                pig.getTicksLived() + ATTACK_COOLDOWN;
+
+        plugin.getLogger().info(
+                "[GorillaAI] attack="
+                        + selected
+                        + " target="
+                        + target.getName()
+        );
+
+        return true;
+    }
+
+    // =====================================
     // 徘徊
-    // =========================================
+    // =====================================
 
     private void wander(
             ActiveModel model,
             Pig pig,
-            GorillaState state
+            State state
     ) {
 
         int now = pig.getTicksLived();
-
-        Location position = pig.getLocation();
 
         if (state.wanderGoal != null) {
 
             Vector toward = state.wanderGoal
                     .toVector()
-                    .subtract(position.toVector())
+                    .subtract(
+                            pig.getLocation().toVector()
+                    )
                     .setY(0);
 
             if (toward.lengthSquared() <= 1.0) {
@@ -496,8 +506,13 @@ public final class GorillaAutoAI {
 
                 Vector direction = toward.normalize();
 
-                if (moveHorizontal(
+                GorillaFacing.faceDirection(
+                        pig,
                         model,
+                        direction
+                );
+
+                if (moveHorizontal(
                         pig,
                         direction,
                         WANDER_SPEED
@@ -525,13 +540,9 @@ public final class GorillaAutoAI {
             }
         }
 
-        stopHorizontalMovement(pig);
+        stopHorizontal(pig);
 
-        setMovement(
-                model,
-                state,
-                Movement.IDLE
-        );
+        setMovement(model, state, Movement.IDLE);
 
         if (now < state.nextWanderTick) {
             return;
@@ -552,18 +563,19 @@ public final class GorillaAutoAI {
         state.nextWanderTick = now + 40;
     }
 
-    // =========================================
-    // ターゲット選択
-    // =========================================
+    // =====================================
+    // 攻撃対象の選択
+    // =====================================
 
     private Player chooseTarget(
             Pig pig,
-            GorillaState state
+            State state
     ) {
 
-        Location origin = pig.getLocation();
+        List<Player> candidates =
+                new ArrayList<>();
 
-        List<Player> candidates = new ArrayList<>();
+        Location origin = pig.getLocation();
 
         for (Player player :
                 pig.getWorld().getPlayers()) {
@@ -571,13 +583,11 @@ public final class GorillaAutoAI {
             if (player.isDead()
                     || player.getGameMode()
                             == GameMode.SPECTATOR) {
-
                 continue;
             }
 
             if (player.getLocation()
-                    .distanceSquared(origin)
-                    <= DETECT_DISTANCE_SQ) {
+                    .distanceSquared(origin) <= DETECT_SQ) {
 
                 candidates.add(player);
             }
@@ -591,50 +601,49 @@ public final class GorillaAutoAI {
             return null;
         }
 
-        Player existing =
-                state.targetId == null
-                        ? null
-                        : Bukkit.getPlayer(state.targetId);
+        Player previous = state.targetId == null
+                ? null
+                : Bukkit.getPlayer(state.targetId);
 
-        if (existing != null
-                && candidates.contains(existing)
+        if (previous != null
+                && candidates.contains(previous)
                 && pig.getTicksLived()
                         < state.nextTargetSelectionTick) {
 
-            return existing;
+            return previous;
         }
 
-        Player selected = candidates.get(
+        Player chosen = candidates.get(
                 ThreadLocalRandom.current()
                         .nextInt(candidates.size())
         );
 
-        state.targetId = selected.getUniqueId();
+        state.targetId = chosen.getUniqueId();
 
         state.nextTargetSelectionTick =
                 pig.getTicksLived() + 160;
 
-        return selected;
+        return chosen;
     }
 
-    // =========================================
-    // 移動アニメーション
-    // =========================================
+    // =====================================
+    // アニメーション制御
+    // =====================================
 
     private void setMovement(
             ActiveModel model,
-            GorillaState state,
+            State state,
             Movement wanted
     ) {
 
         if (wanted == Movement.NONE) {
 
-            stopMovementAnimation(model);
+            stopAnimation(model);
             state.movement = Movement.NONE;
             return;
         }
 
-        String name =
+        String animation =
                 wanted == Movement.WALK
                         ? "walk"
                         : "idle";
@@ -642,15 +651,12 @@ public final class GorillaAutoAI {
         boolean changed =
                 state.movement != wanted;
 
-        boolean actuallyPlaying =
-                model.getAnimationHandler()
-                        .isPlayingAnimation(name);
-
-        if (!changed && actuallyPlaying) {
+        if (!changed && model.getAnimationHandler()
+                .isPlayingAnimation(animation)) {
             return;
         }
 
-        int now = (int) (debugTicks);
+        int now = (int) aiTicks;
 
         if (!changed
                 && now < state.nextAnimationCheckTick) {
@@ -658,12 +664,12 @@ public final class GorillaAutoAI {
         }
 
         if (changed) {
-            stopMovementAnimation(model);
+            stopAnimation(model);
         }
 
         if (model.getAnimationHandler()
                 .playAnimation(
-                        name,
+                        animation,
                         0.12,
                         0.12,
                         1.0,
@@ -671,109 +677,85 @@ public final class GorillaAutoAI {
                 ) != null) {
 
             state.movement = wanted;
-
-            animationStates.put(model, wanted);
-
-            state.nextAnimationCheckTick = now + 10;
+            animations.put(model, wanted);
 
         } else {
 
-            state.nextAnimationCheckTick = now + 10;
-
             state.movement = Movement.NONE;
-
-            animationStates.remove(model);
+            animations.remove(model);
         }
+
+        state.nextAnimationCheckTick = now + 10;
     }
 
-    private void stopMovementAnimation(
+    private void stopAnimation(
             ActiveModel model
     ) {
 
         Movement previous =
-                animationStates.remove(model);
+                animations.remove(model);
 
         if (previous == Movement.IDLE) {
-
             model.getAnimationHandler()
                     .stopAnimation("idle");
         }
 
         if (previous == Movement.WALK) {
-
             model.getAnimationHandler()
                     .stopAnimation("walk");
         }
     }
 
-    // =========================================
-    // 移動処理
-    // =========================================
+    // =====================================
+    // 水平方向への移動
+    // =====================================
 
     private boolean moveHorizontal(
-            ActiveModel model,
             Pig pig,
             Vector direction,
             double speed
     ) {
 
-        Location current = pig.getLocation();
-
-        Location next = current.clone().add(
+        Location next = pig.getLocation().add(
                 direction.getX() * speed,
                 0,
                 direction.getZ() * speed
         );
 
         if (!next.getBlock().isPassable()
-                || !next.clone().add(0, 1, 0)
+                || !next.clone()
+                        .add(0, 1, 0)
                         .getBlock().isPassable()) {
 
-            lastMoveResult = "BLOCKED";
+            lastMove = "BLOCKED";
             return false;
         }
 
-        // 移動方向からYawを計算
-        float yaw =
-                GorillaFacing.yawFromDirection(direction);
-
-        next.setYaw(yaw);
-        next.setPitch(0f);
-
-        // 先に土台を移動させる
-        boolean success = pig.teleport(next);
-
-        lastMoveResult =
-                success
-                        ? "MOVED"
-                        : "TELEPORT_FALSE";
-
-        if (!success) {
-            return false;
-        }
-
-        // ★重要な修正
-        // teleport完了後の土台の向きを基準に、
-        // ModelEngineの本体・頭部の向きを同期する。
-        GorillaFacing.faceYaw(
-                pig,
-                model,
-                pig.getLocation().getYaw()
+        next.setYaw(
+                GorillaFacing.yawFromDirection(
+                        direction
+                )
         );
 
-        return true;
+        next.setPitch(0f);
+
+        boolean success = pig.teleport(next);
+
+        lastMove = success
+                ? "MOVED"
+                : "TELEPORT_FALSE";
+
+        return success;
     }
 
-    // =========================================
-    // 移動停止
-    // =========================================
-
-    private void stopHorizontalMovement(Pig pig) {
-
-        double y = pig.getVelocity().getY();
+    private void stopHorizontal(Pig pig) {
 
         pig.setVelocity(
-                new Vector(0, y, 0)
+                new Vector(
+                        0,
+                        pig.getVelocity().getY(),
+                        0
+                )
         );
     }
 }
