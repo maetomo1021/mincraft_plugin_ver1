@@ -31,6 +31,16 @@ commands:
     usage: /startreindeergame
     permission: m10practice.admin
 
+  spawngorilla:
+    description: 暴走ゴリラを召喚して攻撃をテスト
+    usage: /spawngorilla
+    permission: m10practice.admin
+
+  removegorilla:
+    description: 暴走ゴリラをモデルとBossBarごと一括削除
+    usage: /removegorilla
+    permission: m10practice.admin
+
 permissions:
   m10practice.spawnminigolem:
     default: op
