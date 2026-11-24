@@ -13,6 +13,7 @@
 /server/
 /.gradle/
 /build/
+/miku-map
 
 # Package Files #
 *.jar
@@ -29,3 +30,5 @@ replay_pid*
 src/main/java/com/example/m10practice/GorillaExtraAttacks.java
 src/main/java/com/example/m10practice/GorillaMeteorAttack.java
 src/main/java/com/example/m10practice/GorillaAutoAI.java
+src/main/java/com/example/test.javva
+src/main/java/com/example/m10practice/test.java
